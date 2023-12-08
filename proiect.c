@@ -222,42 +222,55 @@ void generare_array_linii_scrise(int* pid, int n, int* nr_linii_arr)
 
 void color_gray(char* entry_img)
 {
-  char buffer[1000];
-  int img_descriptor=open(entry_img,O_RDWR);
-  if(img_descriptor==-1)
-    {
-      perror("Imaginea nu poate fi accesata color gray\n");
-      exit(-1);
-    }  char dimensiuni[100];
-  if(read(img_descriptor,buffer,28)==-1)
-    {
-      perror("eroare la citire 28");
-      exit(-1);
+  char out_img_name[200];
+  sprintf(out_img_name,"%s_modified",entry_img);
+  int out_img_descriptor = open(out_img_name, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (out_img_descriptor == -1) {
+        perror("Error opening output file");
+        close(out_img_descriptor);
+        exit(EXIT_FAILURE);
     }
-  strcpy(dimensiuni,width_and_height(img_descriptor));
-  char* lungime=strtok(dimensiuni," ");
-  char* inaltime=strtok(NULL,"\n");
-  int nr_of_pixels=atoi(inaltime)*atoi(lungime);
-   char pixel[4];
-   char gri;
-   int i;
-   for(i=0;i<nr_of_pixels;i++)
-     {
-       if(read(img_descriptor,pixel,4)==-1)
-	 {
-	   perror("eroare la citirea culorii");
-	   exit(-1);
-	 }
-       gri=0.299 * pixel[0] + 0.587 * pixel[1] + 0.114 * pixel[2];
-       memset(pixel,gri,sizeof(pixel));
-       if(write(img_descriptor, pixel, 3) == -1) {
-	 perror("eroare la modificare pixel alb_negru");
-	 exit(-1);
-       }
-     }
-   
-printf("fisierul a fost modificat cu succes\n");
-  
+
+    int input_img_descriptor = open(entry_img, O_RDONLY);
+    if (input_img_descriptor == -1) {
+        perror("Error opening input file");
+        exit(EXIT_FAILURE);
+    }
+    char header[54];
+    if (read(input_img_descriptor, header, 54) != 54) {
+        perror("Error reading input file header");
+        close(input_img_descriptor);
+        close(out_img_descriptor);
+        exit(EXIT_FAILURE);
+    }
+    if (write(out_img_descriptor, header, 54) != 54) {
+        perror("eroare la scriere in imagine");
+        close(input_img_descriptor);
+        close(out_img_descriptor);
+        exit(EXIT_FAILURE);
+    }
+    char pixel[3];
+    while (read(input_img_descriptor, pixel, 3) == 3) {
+        unsigned char rosu = pixel[2];
+        unsigned char verde = pixel[1];
+        unsigned char albastru = pixel[0];
+        unsigned char gri = 0.299 * rosu + 0.587 * verde + 0.114 * albastru;
+
+        // Scrie valorile calculate in fisierul de iesire
+        pixel[0] = gri;
+        pixel[1] = gri;
+        pixel[2] = gri;
+        if (write(out_img_descriptor, pixel, 3) != 3) {
+            perror("eroare la modificarea imgainii");
+            close(input_img_descriptor);
+            close(out_img_descriptor);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Inchide fisierele
+    close(input_img_descriptor);
+    close(out_img_descriptor);
 }
 // 3********************************************************************************************
 
@@ -277,7 +290,7 @@ void process_entry(int wr_descriptor, char* entry_name, char* dir_path) {
       transfer_data_bmp(wr_descriptor,entry_st,img_descriptor,entry_name);
       close(img_descriptor);
       int pid;
-      if(pid=fork()==-1)
+      if((pid=fork())==-1)
 	{
 	  perror("eroare la crearea procesului de modificare a imgainii");
 	  exit(-1);
