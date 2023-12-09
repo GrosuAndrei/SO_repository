@@ -11,6 +11,10 @@
 #include <dirent.h>
 #include <libgen.h>
 
+int pfd1[2]; // capetele pipe-ului dintre procesele fiu
+int pfd2[2]; // proces fiu 2 parinte
+
+int contor_global=0;
 char name_statistica[100];
 // 1*****************************************************************************************
 
@@ -28,12 +32,24 @@ int get_img_descriptor(char* nume_fisier)
 char* width_and_height(int img_descriptor)
 {
   char* buffer=malloc(100*sizeof(char));
-  read(img_descriptor,buffer,18);
+  if(read(img_descriptor,buffer,18)==-1)
+    {
+      perror("eroare la citier buffer ");
+      exit(-1);
+    }
   int* Width=malloc(sizeof(int));
-  read(img_descriptor,Width,4);
+  if(read(img_descriptor,Width,4)==-1)
+    {
+      perror("eroare la scriere width");
+      exit(-1);
+    }
   buffer[4]='\0';
   int* Height=malloc(sizeof(int));
-  read(img_descriptor,Height,4);
+  if(read(img_descriptor,Height,4)==-1)
+    {
+      perror("eroare la scriere height ");
+      exit(-1);
+    }
   char* result=malloc(100*sizeof(char));
   sprintf(result,"%d %d",*Width,*Height);
   return result;// "width height" concatenate (teoretic)
@@ -223,31 +239,33 @@ void generare_array_linii_scrise(int* pid, int n, int* nr_linii_arr)
 void color_gray(char* entry_img)
 {
   char out_img_name[200];
-  sprintf(out_img_name,"%s_modified",entry_img);
+  strncpy(out_img_name,entry_img,strlen(entry_img)-4);
+  out_img_name[strlen(out_img_name)-5]='\0';
+  strcat(out_img_name,"_modified.bmp");
   int out_img_descriptor = open(out_img_name, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (out_img_descriptor == -1) {
         perror("Error opening output file");
         close(out_img_descriptor);
-        exit(EXIT_FAILURE);
+        exit(-1);
     }
 
     int input_img_descriptor = open(entry_img, O_RDONLY);
     if (input_img_descriptor == -1) {
         perror("Error opening input file");
-        exit(EXIT_FAILURE);
+        exit(-1);
     }
     char header[54];
     if (read(input_img_descriptor, header, 54) != 54) {
         perror("Error reading input file header");
         close(input_img_descriptor);
         close(out_img_descriptor);
-        exit(EXIT_FAILURE);
+        exit(-1);
     }
     if (write(out_img_descriptor, header, 54) != 54) {
         perror("eroare la scriere in imagine");
         close(input_img_descriptor);
         close(out_img_descriptor);
-        exit(EXIT_FAILURE);
+        exit(-1);
     }
     char pixel[3];
     while (read(input_img_descriptor, pixel, 3) == 3) {
@@ -264,7 +282,7 @@ void color_gray(char* entry_img)
             perror("eroare la modificarea imgainii");
             close(input_img_descriptor);
             close(out_img_descriptor);
-            exit(EXIT_FAILURE);
+            exit(-1);
         }
     }
 
@@ -273,6 +291,47 @@ void color_gray(char* entry_img)
     close(out_img_descriptor);
 }
 // 3********************************************************************************************
+
+char* get_data(char* file_name)
+{
+  int file_descriptor = open(file_name, O_RDONLY);
+
+    if (file_descriptor == -1)
+      {
+	perror("deschiderea fisierului fara .bmp a esuat");
+	exit(-1);
+      }
+
+    char *fileContent = (char *)malloc(4096);
+    if (fileContent == NULL)
+      {
+	printf("Eroare la alocarea memoriei.\n");
+	close(file_descriptor);
+        exit(-1);
+      }
+    
+    ssize_t bytesRead;
+    ssize_t totalBytesRead = 0;
+    while ((bytesRead = read(file_descriptor, fileContent + totalBytesRead, 4096)) > 0) {
+        totalBytesRead += bytesRead;
+        fileContent = realloc(fileContent, totalBytesRead + 4096);
+        if (fileContent == NULL)
+	  {
+	    printf("Eroare la realocarea memoriei.\n");
+            close(file_descriptor);
+	    exit(-1);
+	  }
+    }
+
+    if (bytesRead == -1) {
+        perror("Eroare la citirea fisierului.\n");
+        free(fileContent);
+        close(file_descriptor);
+	exit(-1);
+    }
+    close(file_descriptor);
+    return fileContent;
+}
 
 // 4********************************************************************************************
 void process_entry(int wr_descriptor, char* entry_name, char* dir_path) {
@@ -289,20 +348,19 @@ void process_entry(int wr_descriptor, char* entry_name, char* dir_path) {
       int img_descriptor=get_img_descriptor(entry_path);
       transfer_data_bmp(wr_descriptor,entry_st,img_descriptor,entry_name);
       close(img_descriptor);
-      int pid;
-      if((pid=fork())==-1)
-	{
-	  perror("eroare la crearea procesului de modificare a imgainii");
-	  exit(-1);
-	}
-      if(pid==0)
-	{
-	  color_gray(entry_path);
-	  exit(1);
-	}
     } else {
       // Altfel, fișier obișnuit fără extensie .bmp
       transfer_data_not_bmp(wr_descriptor,entry_st,entry_name);
+      if(close(pfd1[0]) == -1 || close(pfd2[1]) == -1 || close(pfd2[0]) == -1)
+	{
+	  perror("eroare la inchiderea capetelor de scriere/citire din pipe proc 1 process_entry");
+	  exit(-1);
+	}
+      char info[1000];
+      strcpy(info,get_data(entry_path));
+      write(pfd1[1], info, strlen(info)+1);
+      
+      close(pfd1[1]);
     }
   } else if (S_ISLNK(entry_st.st_mode)) {
     // Legătură simbolică
@@ -320,7 +378,7 @@ void process_entry(int wr_descriptor, char* entry_name, char* dir_path) {
 }
 
 
-void process_directory(char* in_dir_path, char* out_dir_path) {
+void process_directory(char* in_dir_path, char* out_dir_path, char* c) {
   DIR* in_dir;
   struct dirent* entry;
   in_dir = opendir(in_dir_path);
@@ -335,7 +393,7 @@ void process_directory(char* in_dir_path, char* out_dir_path) {
     {
       perror("Eroare la deschiderea directorului 2");
     }
-  
+
   int nr_linii;
   int nr_linii_arr[100];
   int wr_descriptor;
@@ -344,41 +402,120 @@ void process_directory(char* in_dir_path, char* out_dir_path) {
   char nume_intrari[100][100];
   int i=0;
   
-  while ((entry = readdir(in_dir)) != NULL) {
-    if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
-      if((pid[i]=fork())<0)
+  while ((entry = readdir(in_dir)) != NULL)
+    {
+      if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
 	{
-	  perror("Eroare la crearea procesului");
-	  exit(-1);
+	  if((pid[i]=fork())<0)
+	    {
+	      perror("Eroare la crearea procesului");
+	      exit(-1);
+	      }
+	  if(pid[i]==0)
+	    {
+	      nr_linii=0;
+	      sprintf(nume_statistica,"%s/%s",out_dir_path, entry->d_name);
+	      wr_descriptor = get_wr_descriptor(nume_statistica); 
+	      process_entry(wr_descriptor, entry->d_name, in_dir_path);
+	      nr_linii=nr_linii_scrise(wr_descriptor);
+	      close(wr_descriptor);
+	      exit(nr_linii);
+	    }
+	  char name[500];
+	  sprintf(name,"%s/%s",in_dir_path,entry->d_name);
+	  struct stat entry_st;
+	  if (lstat(name, &entry_st) == -1)
+	    {
+	      perror("Eroare la stat process_directory");
+	      exit(-1);
+	    }
+	  if (S_ISREG(entry_st.st_mode))
+	    {
+	      i++;
+	       if (strcmp(entry->d_name + strlen(entry->d_name) - 4, ".bmp") == 0)//caz fisier bmp
+		 {
+		   if((pid[i]=fork())<0)
+		     {
+		       perror("eroare la crearea procesului adaugator bmp");
+		       exit(-1);
+		     }
+		   if(pid[i]==0)
+		     {
+		       color_gray(name);
+		       exit(0);
+		     }
+		 }
+	       else
+		 {
+		   if(pipe(pfd1)<0)
+		     {
+		       perror("Eroare la crearea pipe-ului\n");
+		       exit(1);
+		     }
+	  
+		   if( pipe(pfd2) < 0)
+		     {
+		       perror("eroare la crearea pipe-ului\n");
+		       exit(-1);
+		     }
+		   if((pid[i]=fork())<0)
+		  {
+		    perror("eroare la crearea procesului adaugator fisier fara extensia bmp");
+		    exit(-1);
+		  }
+		if(pid[i]==0)
+		  {
+		    if(close(pfd1[1]) == -1 || close(pfd2[0]) == -1)
+		      {
+			perror("eroare la inchiderea capetelor de scriere/citire din pipe");
+			exit(-1); 
+		      }
+		   
+		    if(dup2(pfd2[1], 1) == -1)
+		      {
+			perror("eroare la redirectare stdout");
+			exit(-1);
+		      }
+		    
+		    execlp("/home/andrei/univer/anul_3/SO_proiect/script.sh", "/home/andrei/univer/anul_3/SO_proiect/script.sh", c, NULL);	       
+		    perror("Eroare la executia fisierul sh");
+		    if(close(pfd2[1]) == -1 || close(pfd1[0]) == -1 || close(pfd1[1]) == -1) {
+		      perror("eroare la inchiderea capetelor de scriere/citire din pipe proc 2 executie sh");
+		      exit(-1); 
+		    }
+		    exit(1);
+		  }
+		char info[1024];
+		if(read(pfd2[0], info, sizeof(info)) == -1)
+		  {
+		    perror("eroare la citire inforamtiei transmise prin pipe");
+		    exit(-1);
+		  }
+		int contor;                      
+		sscanf(info, "%d", &contor);
+		printf("\nIn fisierul %s exista %d propozitii corecte care contin caracterul %s\n", name ,contor, c);
+		contor_global += contor;
+		 }
+	    }
+	  strcpy(nume_intrari[i],entry->d_name);
+	  i++;
 	}
-      if(pid[i]==0)
-	{
-	  nr_linii=0;
-	  sprintf(nume_statistica,"%s/%s",out_dir_path, entry->d_name);
-	  wr_descriptor = get_wr_descriptor(nume_statistica); 
-	  process_entry(wr_descriptor, entry->d_name, in_dir_path);
-	  nr_linii=nr_linii_scrise(wr_descriptor);
-	  close(wr_descriptor);
-	  exit(nr_linii);
-	}
-      strcpy(nume_intrari[i],entry->d_name);
-      i++;
     }
-  }
   generare_array_linii_scrise(pid, i, nr_linii_arr);
-  for(int j=0;j<i;j++) {
-    printf("proces %d evalueaza fisierul: %s scrie %d linii\n", pid[j], nume_intrari[j], nr_linii_arr[j]);
-    printf("PID %d terminat",pid[j]);
-    perror(" cu codul: ");
-  }
+  for(int j=0;j<i;j++)
+    {
+      printf("proces %d evalueaza fisierul: %s scrie %d linii\n", pid[j], nume_intrari[j], nr_linii_arr[j]);
+      printf("PID %d terminat",pid[j]);
+      perror(" cu codul: ");
+    }
   closedir(in_dir);
   closedir(out_dir);
 }
 // 4****************************************************************************************
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    printf("Usage: %s <director_intrare> <director_iesire\n", argv[0]);
+  if (argc != 4) {
+    printf("Usage: %s <director_intrare> <director_iesire> <c>\n", argv[0]);
     exit(-1);
   }
 
@@ -394,6 +531,6 @@ int main(int argc, char** argv) {
   }
   
 
-  process_directory(argv[1], argv[2]);
+  process_directory(argv[1], argv[2], argv[3]);
   return 0;
 }
